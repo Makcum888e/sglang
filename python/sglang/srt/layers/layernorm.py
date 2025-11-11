@@ -297,6 +297,55 @@ class RMSNorm(CustomOp):
 
         return self.forward(x, residual)
 
+class RMSNormQuant(CustomOp):
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-6,
+        attn=None,
+        mlp=None,
+        var_hidden_size: Optional[int] = None,
+    ) -> None:
+        assert attn or mlp
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.attn = attn
+        self.mlp = mlp
+        self.variance_epsilon = eps
+        self.hidden_size = hidden_size
+        self.variance_size_override = (
+            None if var_hidden_size == hidden_size else var_hidden_size
+        )
+        if _use_aiter:
+            self._forward_method = self.forward_aiter
+        if get_bool_env_var("SGLANG_ENABLE_DETERMINISTIC_INFERENCE"):
+            self._forward_method = self.forward_native
+
+    def forward_npu(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if residual is not None:
+            if self.attn:
+                scale = self.attn.qkv_proj.aclnn_input_scale_reciprocal
+                offset = self.attn.qkv_proj.aclnn_input_offset
+            else:
+                scale = self.mlp.gate_up_proj.aclnn_input_scale_reciprocal
+                offset = self.mlp.gate_up_proj.aclnn_input_offset
+
+            out, _, residual_out = torch_npu.npu_add_rms_norm_quant(
+                residual,
+                x,
+                self.weight.data,
+                1.0 / scale,
+                offset,
+                axis=-1,
+                epsilon=self.variance_epsilon,
+            )
+            return out, residual_out
+
+        return torch_npu.npu_rms_norm(x, self.weight.data, self.variance_epsilon)[0]
 
 class LayerNorm(CustomOp):
     def __init__(
