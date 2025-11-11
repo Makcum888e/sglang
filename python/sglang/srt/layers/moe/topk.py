@@ -439,6 +439,27 @@ def fused_topk_torch_native(
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
     return topk_weights, topk_ids
 
+def fused_topk_npu(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    correction_bias: torch.Tensor = None,
+):
+    if correction_bias is not None:
+        return fused_topk_torch_native(
+            hidden_states, gating_output, topk, renormalize, correction_bias
+        )
+    assert (
+        hidden_states.shape[0] == gating_output.shape[0]
+    ), f"Number of tokens mismatch, {hidden_states.shape=} vs {gating_output.shape=}"
+    topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k_softmax(
+        x=gating_output, finished=None, k=topk
+    )
+    topk_ids = topk_ids.to(torch.int32)
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    return topk_weights, topk_ids
 
 def fused_topk_cpu(
     hidden_states: torch.Tensor,
@@ -815,7 +836,10 @@ if _is_cpu and _is_cpu_amx_available:
 else:
     biased_grouped_topk = biased_grouped_topk_gpu
     grouped_topk = grouped_topk_gpu
-    fused_topk_native = fused_topk_torch_native
+    if _is_npu:
+        fused_topk_native = fused_topk_npu
+    else:
+        fused_topk_native = fused_topk_torch_native
 
 
 def select_experts(
