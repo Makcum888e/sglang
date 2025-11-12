@@ -1388,6 +1388,29 @@ class MRotaryEmbedding(RotaryEmbedding):
         ):
             self.cos_sin_cache = self.cos_sin_cache.to(query.device, dtype=query.dtype)
 
+    def _forward_npu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        rotary_mode = "half"
+        if self.is_neox_style:
+            rotary_mode = "half"
+        else:
+            rotary_mode = "interleave"
+        mrope_section = [0, 0, 0]
+        query_out, key_out = torch_npu.npu_mrope(
+            positions,
+            query,
+            key,
+            self.cos_sin_cache,
+            self.head_size,
+            mrope_section=mrope_section,
+            rotary_mode=rotary_mode,
+        )
+        return query_out, key_out
+    
     @torch.compile(dynamic=True, backend=get_compiler_backend())
     def _forward_native(
         self,
@@ -1462,6 +1485,8 @@ class MRotaryEmbedding(RotaryEmbedding):
 
         if positions.ndim == 2 and self.mrope_section and _is_cuda:
             return self._forward_triton(positions, query, key)
+        elif _is_npu:
+            return self._forward_npu(positions, query, key)
         else:
             return self._forward_native(positions, query, key)
 
