@@ -160,6 +160,7 @@ class AscendAttnBackend(AttentionBackend):
 
         metadata.block_tables = self.graph_metadata["block_tables"][:bs, :]
         metadata.seq_lens_cpu_list = seq_lens.cpu().int().tolist()
+        metadata.seq_lens_cpu_int = seq_lens.cpu().int()
         metadata.seq_lens = seq_lens
         metadata.actual_seq_lengths_q = torch.tensor(
             [1 + i * 1 for i in range(bs)], dtype=torch.int32, device=seq_lens.device
@@ -577,51 +578,25 @@ class AscendAttnBackend(AttentionBackend):
                 )
 
         if not self.use_mla:
-            k_cache = forward_batch.token_to_kv_pool.get_key_buffer(
-                layer.layer_id
-            ).view(-1, self.page_size, layer.tp_k_head_num * layer.qk_head_dim)
-            v_cache = forward_batch.token_to_kv_pool.get_value_buffer(
-                layer.layer_id
-            ).view(-1, self.page_size, layer.tp_v_head_num * layer.v_head_dim)
-            query = q.reshape(-1, 1, layer.tp_q_head_num * layer.qk_head_dim)
-            if self.forward_metadata.seq_lens_cpu_int is None:
-                actual_seq_len_kv = self.forward_metadata.seq_lens_cpu_list
-            else:
-                actual_seq_len_kv = (
-                    self.forward_metadata.seq_lens_cpu_int.cpu().int().tolist()
-                )
+            k_cache = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id)
+            v_cache = forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id)
+            query = q.reshape(-1, layer.tp_q_head_num, layer.qk_head_dim)
             num_tokens = query.shape[0]
-            workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
-                query,
-                k_cache,
-                v_cache,
-                block_table=self.forward_metadata.block_tables,
-                block_size=self.page_size,
-                num_heads=layer.tp_q_head_num,
-                num_key_value_heads=layer.tp_k_head_num,
-                input_layout="BSH",
-                scale=layer.scaling,
-                actual_seq_lengths_kv=actual_seq_len_kv,
-            )
             output = torch.empty(
-                (num_tokens, 1, layer.tp_q_head_num * layer.v_head_dim),
-                dtype=q.dtype,
-                device=q.device,
+                (num_tokens, layer.tp_q_head_num, layer.v_head_dim),
+                dtype=query.dtype,
+                device=query.device,
             )
-            softmax_lse = torch.empty(1, dtype=q.dtype, device=q.device)
-            torch_npu.npu_fused_infer_attention_score.out(
-                query,
-                k_cache,
-                v_cache,
-                block_table=self.forward_metadata.block_tables,
-                block_size=self.page_size,
+            torch_npu._npu_paged_attention(
+                query=query,
+                key_cache=k_cache,
+                value_cache=v_cache,
                 num_heads=layer.tp_q_head_num,
-                num_key_value_heads=layer.tp_k_head_num,
-                input_layout="BSH",
-                scale=layer.scaling,
-                actual_seq_lengths_kv=actual_seq_len_kv,
-                workspace=workspace,
-                out=[output, softmax_lse],
+                num_kv_heads=layer.tp_k_head_num,
+                scale_value=layer.scaling,
+                block_table=self.forward_metadata.block_tables,
+                context_lens=self.forward_metadata.seq_lens_cpu_int,
+                out=output,
             )
             return output.view(num_tokens, layer.tp_q_head_num * layer.v_head_dim)
         else:

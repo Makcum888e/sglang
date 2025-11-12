@@ -53,9 +53,7 @@ class NPUGraphRunner(CudaGraphRunner):
         return out
 
     def _update_inputs(self, seq_lens):
-        self.graphs[self.bs].update(
-            cpu_update_input=[{"actual_seq_lengths_kv": seq_lens}]
-        )
+        self.graphs[self.bs].update(cpu_update_input=[{"context_lens": seq_lens}])
 
     def _cache_loc_dtype(self):
         return torch.int32
@@ -82,6 +80,7 @@ class NPUGraphRunner(CudaGraphRunner):
                 seq_lens = forward_batch.seq_lens.cpu().tolist() + [0] * (
                     self.bs - self.raw_bs
                 )
+            seq_lens = torch.tensor(seq_lens, dtype=torch.int32)
             thread = threading.Thread(target=self._update_inputs, args=(seq_lens,))
             thread.start()
             self.graphs[self.bs].replay()
