@@ -55,7 +55,7 @@ class NPUGraphRunner(CudaGraphRunner):
     def _update_inputs(self, seq_lens):
         self.graphs[self.bs].update(
             cpu_update_input=[
-                {self.model_runner.attn_backend.get_decode_seq_len_name: seq_lens}
+                {self.model_runner.attn_backend.get_decode_seq_len_name(): seq_lens}
             ]
         )
 
@@ -85,7 +85,7 @@ class NPUGraphRunner(CudaGraphRunner):
                     self.bs - self.raw_bs
                 )
             if isinstance(
-                self.model_runner.attn_backend.get_decode_seq_len_type, torch.Tensor
+                self.model_runner.attn_backend.get_decode_seq_len_type(), torch.Tensor
             ):
                 seq_lens = torch.tensor(seq_lens, dtype=torch.int32)
             thread = threading.Thread(target=self._update_inputs, args=(seq_lens,))
