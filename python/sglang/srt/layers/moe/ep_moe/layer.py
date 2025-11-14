@@ -492,9 +492,58 @@ class DeepEPMoE(FusedMoE):
             raise ValueError(f"Not Supported DeepEP format {dispatch_output.format}")
 
 
+class NpuFuseEPMoE(DeepEPMoE):
+    def __init__(
+        self,
+        num_experts: int,
+        top_k: int,
+        hidden_size: int,
+        intermediate_size: int,
+        layer_id: int,
+        num_fused_shared_experts: int = 0,
+        params_dtype: Optional[torch.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        activation: str = "silu",
+        routed_scaling_factor: Optional[float] = None,
+    ):
+        super().__init__(
+            num_experts=num_experts,
+            top_k=top_k,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            layer_id=layer_id,
+            num_fused_shared_experts=num_fused_shared_experts,
+            params_dtype=params_dtype,
+            quant_config=quant_config,
+            prefix=prefix,
+            activation=activation,
+            routed_scaling_factor=routed_scaling_factor,
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        topk_output: TopKOutput,
+        forward_shared_experts=None,
+        alt_stream=None,
+        disable_sbo=False,
+    ):
+        return self.dispatcher.fused_moe(
+            hidden_states=hidden_states,
+            topk_idx=topk_output.topk_ids,
+            topk_weights=topk_output.topk_weights,
+            gmm1_permuted_weight=self.w13_weight,
+            gmm1_permuted_weight_scale=self.w13_weight_scale,
+            gmm2_weight=self.w2_weight,
+            gmm2_weight_scale=self.w2_weight_scale,
+        )
+
 def get_moe_impl_class(quant_config: Optional[QuantizationConfig]):
     if get_moe_a2a_backend().is_deepep() or get_moe_a2a_backend().is_mooncake():
         return DeepEPMoE
+    if get_moe_a2a_backend().is_ascend_fuseep():
+        return NpuFuseEPMoE
 
     # NEW: Direct FP4 detection (bypasses EP requirements)
     # Check for FP4 quantization with TRTLLM flag, regardless of EP

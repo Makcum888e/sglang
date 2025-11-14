@@ -24,6 +24,7 @@ from sglang.srt.layers.moe import (
 from sglang.srt.layers.moe.token_dispatcher import (
     DeepEPDispatcher,
     MooncakeEPDispatcher,
+    NpuFuseEPDispatcher,
 )
 from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.model_executor.forward_batch_info import (
@@ -1006,3 +1007,13 @@ class MaybeTboDeepEPDispatcher:
     def set_quant_config(self, quant_config: dict):
         for inner in self._inners:
             inner.set_quant_config(quant_config)
+
+class NpuMaybeTboDeepEPDispatcher(MaybeTboDeepEPDispatcher):
+    def __init__(self, **kwargs):
+        num_inner_dispatchers = 2 if is_tbo_enabled() else 1
+        self._inners = [
+            NpuFuseEPDispatcher(**kwargs) for _ in range(num_inner_dispatchers)
+        ]
+
+    def fused_moe(self, **kwargs):
+        return self._execute("fused_moe", **kwargs)

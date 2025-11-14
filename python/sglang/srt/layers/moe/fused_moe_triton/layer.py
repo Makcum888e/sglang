@@ -46,7 +46,7 @@ from sglang.srt.layers.quantization.modelopt_quant import ModelOptNvFp4FusedMoEM
 from sglang.srt.layers.quantization.unquant import UnquantizedFusedMoEMethod
 from sglang.srt.model_loader.weight_utils import narrow_padded_param_and_loaded_weight
 from sglang.srt.server_args import get_global_server_args
-from sglang.srt.two_batch_overlap import MaybeTboDeepEPDispatcher
+from sglang.srt.two_batch_overlap import MaybeTboDeepEPDispatcher, NpuMaybeTboDeepEPDispatcher
 from sglang.srt.utils import (
     cpu_has_amx_support,
     get_bool_env_var,
@@ -81,6 +81,19 @@ def create_moe_dispatcher(moe_runner_config: MoeRunnerConfig) -> BaseDispatcher:
         return StandardDispatcher(moe_runner_config)
     elif a2a_backend.is_deepep() or a2a_backend.is_mooncake():
         return MaybeTboDeepEPDispatcher(
+            group=get_tp_group().device_group,
+            router_topk=moe_runner_config.top_k,
+            permute_fusion=True,
+            num_experts=moe_runner_config.num_experts,
+            num_local_experts=moe_runner_config.num_local_experts,
+            hidden_size=moe_runner_config.hidden_size,
+            params_dtype=moe_runner_config.params_dtype,
+            deepep_mode=get_deepep_mode(),
+            async_finish=True,
+            return_recv_hook=True,
+        )
+    elif a2a_backend.is_ascend_fuseep():
+        return NpuMaybeTboDeepEPDispatcher(
             group=get_tp_group().device_group,
             router_topk=moe_runner_config.top_k,
             permute_fusion=True,
