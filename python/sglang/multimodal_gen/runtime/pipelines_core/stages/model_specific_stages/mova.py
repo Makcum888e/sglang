@@ -18,6 +18,7 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from diffusers.utils.torch_utils import randn_tensor
 from tqdm.auto import tqdm
 
@@ -595,10 +596,13 @@ class MOVADenoisingStage(PipelineStage):
         # Pad if needed
         pad_len = (sp_size - (seq_len % sp_size)) % sp_size
         if pad_len > 0:
-            pad_shape = list(x.shape)
-            pad_shape[dim] = pad_len
-            pad = torch.zeros(pad_shape, dtype=x.dtype, device=x.device)
-            x = torch.cat([x, pad], dim=dim)
+            # pad_shape = list(x.shape)
+            # pad_shape[dim] = pad_len
+            # pad = torch.zeros(pad_shape, dtype=x.dtype, device=x.device)
+            # x = torch.cat([x, pad], dim=dim)
+            num_dims_after = x.ndim - 1 - dim
+            padding = (0, 0) * num_dims_after + (0, pad_len)
+            x = F.pad(x, padding, mode="constant", value=0)
 
         # Shard
         chunk_size = x.shape[dim] // sp_size
@@ -694,17 +698,27 @@ class MOVADenoisingStage(PipelineStage):
         # Build visual freqs for full sequence
         visual_dit._init_freqs()
         visual_freqs = tuple(freq.to(visual_x.device) for freq in visual_dit.freqs)
+        c1 = visual_freqs[0][:t].view(t, 1, 1, -1).size(3)
+        c2 = visual_freqs[1][:h].view(1, h, 1, -1).size(3)
+        c3 = visual_freqs[2][:w].view(1, 1, w, -1).size(3)
+        temp = torch.empty((t, h, w, c1 + c2 + c3), dtype=visual_freqs[0].dtype)
+        temp[:, :, :, :c1] = visual_freqs[0][:t].view(t, 1, 1, -1).expand(t, h, w, -1)
+        temp[:, :, :, c1 : c1 + c2] = (
+            visual_freqs[1][:h].view(1, h, 1, -1).expand(t, h, w, -1)
+        )
+        temp[:, :, :, c1 + c2 : c1 + c2 + c3] = (
+            visual_freqs[2][:w].view(1, 1, w, -1).expand(t, h, w, -1)
+        )
         visual_freqs = (
-            torch.cat(
-                [
-                    visual_freqs[0][:t].view(t, 1, 1, -1).expand(t, h, w, -1),
-                    visual_freqs[1][:h].view(1, h, 1, -1).expand(t, h, w, -1),
-                    visual_freqs[2][:w].view(1, 1, w, -1).expand(t, h, w, -1),
-                ],
-                dim=-1,
-            )
-            .reshape(full_visual_seq_len, 1, -1)
-            .to(visual_x.device)
+            # torch.cat(
+            #    [
+            #        visual_freqs[0][:t].view(t, 1, 1, -1).expand(t, h, w, -1),
+            #        visual_freqs[1][:h].view(1, h, 1, -1).expand(t, h, w, -1),
+            #        visual_freqs[2][:w].view(1, 1, w, -1).expand(t, h, w, -1),
+            #    ],
+            #    dim=-1,
+            # )
+            temp.reshape(full_visual_seq_len, 1, -1).to(visual_x.device)
         )
 
         # Patchify audio latents

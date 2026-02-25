@@ -18,8 +18,14 @@ def apply_rotary_embedding_native(
 ) -> torch.Tensor:
     cos = cos.unsqueeze(-2).to(x.dtype)
     sin = sin.unsqueeze(-2).to(x.dtype)
-    x1 = x[..., ::2]
-    x2 = x[..., 1::2]
+    if not interleaved:
+        x1, x2 = torch.chunk(x, 2, dim=-1)
+    else:
+        x1 = x[..., ::2]
+        x2 = x[..., 1::2]
     o1 = x1 * cos - x2 * sin
     o2 = x2 * cos + x1 * sin
-    return torch.stack((o1, o2), dim=-1).flatten(-2)
+    if not interleaved:
+        return torch.cat((o1, o2), dim=-1)
+    else:
+        return torch.stack((o1, o2), dim=-1).flatten(-2)

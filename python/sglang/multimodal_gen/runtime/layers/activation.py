@@ -113,6 +113,9 @@ class QuickGELU(CustomOp):
         """PyTorch-native implementation equivalent to forward()."""
         return x * torch.sigmoid(1.702 * x)
 
+    def forward_npu(self, x: torch.Tensor) -> torch.Tensor:
+        return torch_npu.npu_fast_gelu(x)
+
 
 _ACTIVATION_REGISTRY = {
     "gelu": nn.GELU,

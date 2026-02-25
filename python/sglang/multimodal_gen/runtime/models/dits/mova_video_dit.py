@@ -522,7 +522,9 @@ class WanModel(CachableDiT, OffloadableDiTMixin):
         self, x: torch.Tensor, control_camera_latents_input: torch.Tensor | None = None
     ):
         # NOTE(dhyu): avoid slow_conv
-        x = x.contiguous(memory_format=torch.channels_last_3d)
+        # x = x.contiguous(memory_format=torch.channels_last_3d)
+        x = rearrange(x, "b c d h w -> b d h w c").contiguous()
+        x = rearrange(x, "b d h w c -> b c d h w")
         x = self.patch_embedding(x)
         grid_size = x.shape[2:]
         x = rearrange(x, "b c f h w -> b (f h w) c").contiguous()
