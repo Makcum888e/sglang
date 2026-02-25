@@ -13,7 +13,6 @@ ONE_NPU_CASES: list[DiffusionTestCase] = [
         DiffusionServerArgs(
             model_path="/root/.cache/modelscope/hub/models/black-forest-labs/FLUX.1-dev",
             modality="image",
-            warmup=True,
         ),
         T2I_sampling_params,
     ),
@@ -38,7 +37,6 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
         DiffusionServerArgs(
             model_path="/root/.cache/modelscope/hub/models/black-forest-labs/FLUX.2-dev",
             modality="image",
-            warmup=True,
             num_gpus=2,
             tp_size=2,
         ),
