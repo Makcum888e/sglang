@@ -639,7 +639,7 @@ def maybe_init_distributed_environment_and_model_parallel(
     if current_platform.is_cuda_alike():
         device = torch.device(f"cuda:{local_rank}")
         torch.cuda.set_device(device)
-    if current_platform.is_npu():
+    elif current_platform.is_npu():
         device = torch.device(f"npu:{local_rank}")
         torch.npu.set_device(device)
 

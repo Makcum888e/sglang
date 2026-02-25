@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Set, Tuple
 
 import torch
 
+from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
@@ -43,7 +44,9 @@ class LayerwiseOffloadManager:
         self.enabled = bool(enabled and torch.get_device_module().is_available())
         if not self.enabled:
             return
-        self.device = torch.device("cuda", torch.get_device_module().current_device())
+        self.device = torch.device(
+            current_platform.device_type, torch.get_device_module().current_device()
+        )
         self.copy_stream = torch.get_device_module().Stream()
 
         self._layer_name_re = re.compile(
