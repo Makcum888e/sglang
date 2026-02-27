@@ -127,5 +127,5 @@ class NPUPlatformBase(Platform):
 
     @classmethod
     def enable_dit_layerwise_offload_for_wan_by_default(cls) -> bool:
-        """NPU performs better without DIT layerwise offload on Wan."""
+        """The performance of the layerwise_offload feature depends on the device's memory size and the memory size occupied by the model. Use --dit-layerwise-offload True if it suitable for your case."""
         return False
