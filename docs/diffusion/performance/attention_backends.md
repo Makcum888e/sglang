@@ -14,7 +14,7 @@ When using the diffusers backend, `--attention-backend` is passed through to dif
 - **CUDA**: prefers FlashAttention (FA3/FA4) when supported; otherwise falls back to PyTorch SDPA.
 - **ROCm**: uses FlashAttention when available; otherwise falls back to PyTorch SDPA.
 - **MPS**: always uses PyTorch SDPA.
-- **NPU**: always uses PyTorch SDPA.
+- **NPU**: for ring attention uses FIA otherwise uses PyTorch SDPA.
 
 ## Backend options
 
@@ -31,6 +31,7 @@ For SGLang-native pipelines, the CLI accepts the lowercase names of `AttentionBa
 | `vmoba_attn` | `VMOBA_ATTN` | Requires `kernel.attn.vmoba_attn.vmoba`. Configure via `--attention-backend-config`. |
 | `aiter` | `AITER` | Requires `aiter`. |
 | `sparse_video_gen_2_attn` | `SPARSE_VIDEO_GEN_2_ATTN` | Requires `svg`. See installation instructions at https://github.com/svg-project/Sparse-VideoGen. |
+| `fia` | `FIA` | NPU specific attention backend |
 
 ## Selection priority
 
@@ -95,6 +96,7 @@ Some backends require additional configuration. You can pass these parameters vi
 | `vmoba_attn` | ✅ | ❌ | ❌ | ❌ | CUDA-only. Requires `kernel.attn.vmoba_attn.vmoba`. Configure via `--attention-backend-config`. |
 | `aiter` | ✅ | ❌ | ❌ | ❌ | Requires `aiter`. |
 | `sparse_video_gen_2_attn` | ✅ | ❌ | ❌ | ❌ | CUDA-only. Requires `svg`. |
+| `fia` | ❌ | ❌ | ❌ | ✅ | NPU-only. |
 
 ## Usage
 
