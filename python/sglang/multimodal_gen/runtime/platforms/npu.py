@@ -137,6 +137,6 @@ class NPUPlatformBase(Platform):
         return False
 
     @classmethod
-    def default_ring_attention_backend(cls) -> bool:
+    def default_ring_attention_backend(cls) -> str:
         """Specify default attention backend for ring_degree > 1."""
         return "fia"
