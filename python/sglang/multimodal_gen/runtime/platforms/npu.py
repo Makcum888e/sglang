@@ -116,6 +116,12 @@ class NPUPlatformBase(Platform):
         head_size: int,
         dtype: torch.dtype,
     ) -> str:
+        if selected_backend == AttentionBackendEnum.FIA:
+            logger.info("Using Fused Infer Attention (FIA) backend.")
+            return (
+                "sglang.multimodal_gen.runtime.layers.attention.backends.fia.FIABackend"
+            )
+
         logger.info("Using Torch SDPA backend.")
         return (
             "sglang.multimodal_gen.runtime.layers.attention.backends.sdpa.SDPABackend"
@@ -129,3 +135,8 @@ class NPUPlatformBase(Platform):
     def enable_dit_layerwise_offload_for_wan_by_default(cls) -> bool:
         """The performance of the layerwise_offload feature depends on the device's memory size and the memory size occupied by the model. Use --dit-layerwise-offload True if it suitable for your case."""
         return False
+
+    @classmethod
+    def default_ring_attention_backend(cls) -> bool:
+        """Specify default attention backend for ring_degree > 1."""
+        return "fia"

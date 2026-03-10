@@ -144,6 +144,7 @@ class _FluxSelfAttention(nn.Module):
             supported_attention_backends = {
                 AttentionBackendEnum.FA,
                 AttentionBackendEnum.TORCH_SDPA,
+                AttentionBackendEnum.FIA,
             }
         self.local_attn = LocalAttention(
             num_heads=self.local_num_heads,
@@ -239,6 +240,7 @@ class _FluxDoubleStreamBlock(nn.Module):
             supported_attention_backends = {
                 AttentionBackendEnum.FA,
                 AttentionBackendEnum.TORCH_SDPA,
+                AttentionBackendEnum.FIA,
             }
         self.local_attn_joint = LocalAttention(
             num_heads=self.local_num_heads,
@@ -353,6 +355,7 @@ class _FluxSingleStreamBlock(nn.Module):
             supported_attention_backends = {
                 AttentionBackendEnum.FA,
                 AttentionBackendEnum.TORCH_SDPA,
+                AttentionBackendEnum.FIA,
             }
         self.local_attn = LocalAttention(
             num_heads=self.local_num_heads,
@@ -595,7 +598,11 @@ def _chunked_feed_forward(
 class SGLangAttentionWrapper(torch.nn.Module):
     """Drop-in replacement for DiffusersAttention that uses sglang's attention backend."""
 
-    _SUPPORTED_BACKENDS = {AttentionBackendEnum.FA, AttentionBackendEnum.TORCH_SDPA}
+    _SUPPORTED_BACKENDS = {
+        AttentionBackendEnum.FA,
+        AttentionBackendEnum.TORCH_SDPA,
+        AttentionBackendEnum.FIA,
+    }
 
     def __init__(
         self,

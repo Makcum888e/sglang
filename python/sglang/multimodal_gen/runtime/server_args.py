@@ -463,15 +463,18 @@ class ServerArgs:
             if self.attention_backend is not None and self.attention_backend not in (
                 "fa",
                 "sage_attn",
+                "fia",
             ):
                 raise ValueError(
-                    "Ring Attention is only supported for flash attention or sage attention backend for now"
+                    "Ring Attention is only supported for flash attention or sage attention or fia backend for now"
                 )
             if self.attention_backend is None:
-                self.attention_backend = "fa"
+                self.attention_backend = (
+                    current_platform.default_ring_attention_backend()
+                )
                 logger.info(
-                    "Ring Attention is currently only supported for flash attention or sage attention; "
-                    "attention_backend has been automatically set to flash attention"
+                    "Ring Attention is currently only supported for flash attention or sage attention or fia; "
+                    "attention_backend has been automatically set to default attention backend for your platform"
                 )
 
         if self.attention_backend is None and self.backend != Backend.DIFFUSERS:

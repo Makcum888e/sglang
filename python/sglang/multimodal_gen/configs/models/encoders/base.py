@@ -20,6 +20,7 @@ class EncoderArchConfig(ArchConfig):
             AttentionBackendEnum.FA,
             AttentionBackendEnum.TORCH_SDPA,
             AttentionBackendEnum.SAGE_ATTN_3,
+            AttentionBackendEnum.FIA,
         }
     )
     output_hidden_states: bool = False

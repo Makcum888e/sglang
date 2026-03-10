@@ -100,6 +100,7 @@ class MistralAttention(nn.Module):
             supported_attention_backends={
                 AttentionBackendEnum.FA,
                 AttentionBackendEnum.TORCH_SDPA,
+                AttentionBackendEnum.FIA,
             },
         )
 

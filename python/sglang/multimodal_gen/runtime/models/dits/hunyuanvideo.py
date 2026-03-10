@@ -928,6 +928,7 @@ class IndividualTokenRefinerBlock(nn.Module):
                 AttentionBackendEnum.FA,
                 AttentionBackendEnum.AITER,
                 AttentionBackendEnum.TORCH_SDPA,
+                AttentionBackendEnum.FIA,
             ),
         )
 

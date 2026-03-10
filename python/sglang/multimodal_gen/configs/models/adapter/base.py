@@ -26,6 +26,7 @@ class AdapterArchConfig(ArchConfig):
             AttentionBackendEnum.VIDEO_SPARSE_ATTN,
             AttentionBackendEnum.VMOBA_ATTN,
             AttentionBackendEnum.SAGE_ATTN_3,
+            AttentionBackendEnum.FIA,
         }
     )
 

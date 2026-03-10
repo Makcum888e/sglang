@@ -36,6 +36,7 @@ class AttentionBackendEnum(enum.Enum):
     AITER = enum.auto()
     SLA_ATTN = enum.auto()
     SAGE_SLA_ATTN = enum.auto()
+    FIA = enum.auto()
     NO_ATTENTION = enum.auto()
 
     def __str__(self):
@@ -378,6 +379,11 @@ class Platform:
     def enable_dit_layerwise_offload_for_wan_by_default(cls) -> bool:
         """Whether to enable DIT layerwise offload by default on the current platform."""
         return True
+
+    @classmethod
+    def default_ring_attention_backend(cls) -> bool:
+        """Specify default attention backend for ring_degree > 1."""
+        return "fa"
 
     def get_attn_backend(self, *args, **kwargs) -> AttentionImpl:
         attention_cls_str = self.get_attn_backend_cls_str(*args, **kwargs)
