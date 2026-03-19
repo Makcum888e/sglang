@@ -34,6 +34,7 @@ class AttentionBackendEnum(enum.Enum):
     SPARSE_VIDEO_GEN_2_ATTN = enum.auto()
     VMOBA_ATTN = enum.auto()
     AITER = enum.auto()
+    AITER_SAGE = enum.auto()
     SLA_ATTN = enum.auto()
     SAGE_SLA_ATTN = enum.auto()
     FIA = enum.auto()
@@ -379,6 +380,11 @@ class Platform:
     def enable_dit_layerwise_offload_for_wan_by_default(cls) -> bool:
         """Whether to enable DIT layerwise offload by default on the current platform."""
         return True
+
+    @classmethod
+    def optimize_vae(cls, vae: torch.nn.Module) -> torch.nn.Module:
+        """Apply platform-specific optimizations to VAE after loading."""
+        return vae
 
     @classmethod
     def default_ring_attention_backend(cls) -> str:
