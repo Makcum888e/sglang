@@ -1,10 +1,6 @@
-# Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
-
-# SPDX-License-Identifier: Apache-2.0
-
 import torch
 
-from sglang.multimodal_gen.runtime.layers.attention.backends.attention_backend import (  # FlashAttentionMetadata,
+from sglang.multimodal_gen.runtime.layers.attention.backends.attention_backend import (
     AttentionBackend,
     AttentionImpl,
     AttentionMetadata,
@@ -47,7 +43,7 @@ class FIAImpl(AttentionImpl):
         self.causal = causal
         self.softmax_scale = softmax_scale
         self.num_heads = num_heads
-        self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
+        self.num_kv_heads = num_kv_heads or num_heads
 
     def forward(
         self,
