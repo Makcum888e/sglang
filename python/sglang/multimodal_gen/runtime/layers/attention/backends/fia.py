@@ -13,12 +13,6 @@ logger = init_logger(__name__)
 
 class FIABackend(AttentionBackend):
 
-    accept_output_buffer: bool = True
-
-    @staticmethod
-    def get_supported_head_sizes() -> list[int]:
-        return [32, 64, 96, 128, 160, 192, 224, 256]
-
     @staticmethod
     def get_enum() -> AttentionBackendEnum:
         return AttentionBackendEnum.FIA
@@ -57,7 +51,7 @@ class FIAImpl(AttentionImpl):
         if self.causal:
             seq_len = query.shape[1]
             mask = torch.triu(
-                torch.ones(seq_len, seq_len, device=query.device), diagonal=True
+                torch.ones(seq_len, seq_len, device=query.device), diagonal=1
             ).bool()
         # transpose to bs, heads, seq_len, head_dim
         query = query.transpose(1, 2)
