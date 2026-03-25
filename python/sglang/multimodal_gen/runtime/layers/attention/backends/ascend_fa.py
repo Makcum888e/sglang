@@ -1,9 +1,13 @@
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 
 from sglang.multimodal_gen.runtime.layers.attention.backends.attention_backend import (
     AttentionBackend,
     AttentionImpl,
     AttentionMetadata,
+    AttentionMetadataBuilder,
 )
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
@@ -11,15 +15,43 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 logger = init_logger(__name__)
 
 
+@dataclass
+class FlashAttentionMetadata:
+    pass
+
+
+class FlashAttentionMetadataBuilder(AttentionMetadataBuilder):
+    def __init__(self) -> None:
+        pass
+
+    def prepare(self) -> None:
+        pass
+
+    def build(  # type: ignore
+        self,
+        raw_latent_shape=list,
+        **kwargs: dict[str, Any],
+    ) -> FlashAttentionMetadata:
+        return FlashAttentionMetadata()
+
+
 class AscendFABackend(AttentionBackend):
 
     @staticmethod
     def get_enum() -> AttentionBackendEnum:
-        return AttentionBackendEnum.FIA
+        return AttentionBackendEnum.FA
 
     @staticmethod
     def get_impl_cls() -> type["AscendFAImpl"]:
         return AscendFAImpl
+
+    @staticmethod
+    def get_metadata_cls() -> type["AttentionMetadata"]:
+        raise NotImplementedError
+
+    @staticmethod
+    def get_builder_cls() -> type["AttentionMetadataBuilder"]:
+        return FlashAttentionMetadataBuilder
 
 
 class AscendFAImpl(AttentionImpl):
