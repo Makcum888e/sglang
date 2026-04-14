@@ -76,6 +76,10 @@ class CudaPlatformBase(Platform):
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
 
     @classmethod
+    def set_device(cls, device: torch.device):
+        torch.cuda.set_device(device)
+        
+    @classmethod
     def get_local_torch_device(cls) -> torch.device:
         return torch.device(f"cuda:{envs.LOCAL_RANK}")
 

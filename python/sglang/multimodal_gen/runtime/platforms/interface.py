@@ -344,6 +344,10 @@ class Platform:
             torch.get_device_module().manual_seed_all(seed)
 
     @classmethod
+    def set_device(cls, device: torch.device):
+        pass
+
+    @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
         """
         Verify whether the current platform supports the specified model

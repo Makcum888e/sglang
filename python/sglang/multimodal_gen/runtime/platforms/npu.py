@@ -69,6 +69,10 @@ class NPUPlatformBase(Platform):
         return True
 
     @classmethod
+    def set_device(cls, device: torch.device):
+        torch.npu.set_device(device)
+
+    @classmethod
     def is_full_nvlink(cls, physical_device_ids: list[int]) -> bool:
         logger.exception(
             "NVLink detection not possible, as context support was"
