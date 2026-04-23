@@ -45,7 +45,7 @@ class VisionLanguageEncoderLoader(ComponentLoader):
                 engine = Engine(
                     model_path=component_model_path,
                     tokenizer_path=processor_path,
-                    mem_fraction_static=0.8,
+                    mem_fraction_static=0.5,
                     enable_multimodal=True,
                     disable_cuda_graph=True,
                     tp_size=server_args.tp_size if server_args.tp_size > 0 else 1,
