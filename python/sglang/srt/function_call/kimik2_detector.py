@@ -4,7 +4,6 @@ import re
 from typing import List
 
 from sglang.srt.entrypoints.openai.protocol import Tool
-from sglang.srt.environ import envs
 from sglang.srt.function_call.base_format_detector import BaseFormatDetector
 from sglang.srt.function_call.core_types import (
     StreamingParseResult,
@@ -16,10 +15,25 @@ from sglang.srt.function_call.utils import _is_complete_json
 
 logger = logging.getLogger(__name__)
 
+_KIMI_K2_SPECIAL_TOKENS = [
+    "<|tool_calls_section_begin|>",
+    "<|tool_calls_section_end|>",
+    "<|tool_call_begin|>",
+    "<|tool_call_end|>",
+    "<|tool_call_argument_begin|>",
+]
+
+
+def _strip_special_tokens(text: str) -> str:
+    """Remove all Kimi-K2 tool-call special tokens from text."""
+    for token in _KIMI_K2_SPECIAL_TOKENS:
+        text = text.replace(token, "")
+    return text
+
 
 class KimiK2Detector(BaseFormatDetector):
     """
-    Detector for Kimi K2 model function call format.
+    Detector for Kimi K2 / K2.5 model function call format.
 
     Format Structure:
     ```
@@ -39,24 +53,24 @@ class KimiK2Detector(BaseFormatDetector):
 
         self.tool_call_start_token: str = "<|tool_call_begin|>"
         self.tool_call_end_token: str = "<|tool_call_end|>"
+        self.tool_call_argument_begin_token: str = "<|tool_call_argument_begin|>"
 
-        # Use <|tool_call_end|> as the anchor instead of \} to handle nested JSON correctly.
-        # re.DOTALL ensures . matches newlines in multi-line JSON arguments.
+        # Support hyphenated function names (common in MCP tools, e.g. mcp__portal__search-documents)
         self.tool_call_regex = re.compile(
-            r"<\|tool_call_begin\|>\s*(?P<tool_call_id>[\w\.]+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>\{.*?)\s*<\|tool_call_end\|>",
+            r"<\|tool_call_begin\|>\s*(?P<tool_call_id>[\w.\-]+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>\{.*?\})\s*<\|tool_call_end\|>",
             re.DOTALL,
         )
 
         self.stream_tool_call_portion_regex = re.compile(
-            r"<\|tool_call_begin\|>\s*(?P<tool_call_id>[\w\.]+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>\{.*)",
+            r"<\|tool_call_begin\|>\s*(?P<tool_call_id>[\w.\-]+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>\{.*)",
             re.DOTALL,
         )
 
         self._last_arguments = ""
 
-        # Robust parser for ids like "functions.search:0" or fallback "search:0"
+        # Robust parser for ids like "functions.search:0", "functions.mcp__search-docs:0", or fallback "search:0"
         self.tool_call_id_regex = re.compile(
-            r"^(?:functions\.)?(?P<name>[\w\.]+):(?P<index>\d+)$"
+            r"^(?:functions\.)?(?P<name>[\w.\-]+):(?P<index>\d+)$"
         )
 
     def has_tool_call(self, text: str) -> bool:
@@ -89,16 +103,7 @@ class KimiK2Detector(BaseFormatDetector):
                 function_name = m.group("name")
                 function_idx = int(m.group("index"))
 
-                # Validate tool name against available tools
-                if function_name not in tool_indices:
-                    logger.warning(
-                        f"Model attempted to call undefined function: {function_name}"
-                    )
-                    if not envs.SGLANG_FORWARD_UNKNOWN_TOOLS.get():
-                        continue
-
-                # Strip trailing whitespace that may appear before <|tool_call_end|>
-                function_args = function_args.strip()
+                logger.debug(f"function_name {function_name}")
 
                 tool_calls.append(
                     ToolCallItem(
@@ -132,10 +137,8 @@ class KimiK2Detector(BaseFormatDetector):
 
         if not has_tool_call:
             self._buffer = ""
-            for e_token in [self.eot_token, self.tool_call_end_token]:
-                if e_token in new_text:
-                    new_text = new_text.replace(e_token, "")
-            return StreamingParseResult(normal_text=new_text)
+            normal_text = _strip_special_tokens(new_text)
+            return StreamingParseResult(normal_text=normal_text)
 
         if not hasattr(self, "_tool_indices"):
             self._tool_indices = self._get_tool_indices(tools)
@@ -174,7 +177,6 @@ class KimiK2Detector(BaseFormatDetector):
                         )
                     )
                     self.current_tool_name_sent = True
-                    # Store the tool call info for serving layer completions endpoint
                     self.prev_tool_call_arr[self.current_tool_id] = {
                         "name": function_name,
                         "arguments": {},
@@ -189,7 +191,11 @@ class KimiK2Detector(BaseFormatDetector):
                         else clean_args
                     )
 
-                    if argument_diff:
+                    parsed_args_diff = argument_diff.split(self.tool_call_end_token, 1)[
+                        0
+                    ]
+
+                    if parsed_args_diff:
                         calls.append(
                             ToolCallItem(
                                 tool_index=self.current_tool_id,
@@ -197,12 +203,13 @@ class KimiK2Detector(BaseFormatDetector):
                                 parameters=argument_diff,
                             )
                         )
-                        self._last_arguments += argument_diff
+                        self._last_arguments += parsed_args_diff
                         self.streamed_args_for_tool[
                             self.current_tool_id
                         ] += argument_diff
 
-                    if _is_complete_json(clean_args):
+                    parsed_args = function_args.split(self.tool_call_end_token, 1)[0]
+                    if _is_complete_json(parsed_args):
                         try:
                             parsed_args = json.loads(clean_args)
                             self.prev_tool_call_arr[self.current_tool_id][
@@ -215,12 +222,11 @@ class KimiK2Detector(BaseFormatDetector):
                         tool_call_end_pattern = (
                             r"<\|tool_call_begin\|>.*?<\|tool_call_end\|>"
                         )
-                        match = re.search(
+                        end_match = re.search(
                             tool_call_end_pattern, current_text, re.DOTALL
                         )
-                        if match:
-                            # Remove the completed tool call from buffer, keep any remaining content
-                            self._buffer = current_text[match.end() :]
+                        if end_match:
+                            self._buffer = current_text[end_match.end() :]
                         else:
                             # <|tool_call_end|> hasn't arrived yet; keep buffer intact
                             # and wait for more data before advancing to the next tool call
@@ -236,7 +242,7 @@ class KimiK2Detector(BaseFormatDetector):
 
         except Exception as e:
             logger.error(f"Error in parse_streaming_increment: {e}")
-            return StreamingParseResult(normal_text=current_text)
+            return StreamingParseResult(normal_text=_strip_special_tokens(current_text))
 
     def structure_info(self) -> _GetInfoFunc:
         """Return function that creates StructureInfo for guided generation."""

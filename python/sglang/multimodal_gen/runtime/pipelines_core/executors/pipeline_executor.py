@@ -31,7 +31,7 @@ class Timer(StageProfiler):
 
     def __init__(self, name="Stage"):
         super().__init__(
-            stage_name=name, timings=None, log_stage_start_end=True, logger=logger
+            stage_name=name, logger=logger, metrics=None, log_stage_start_end=True
         )
 
 
@@ -58,6 +58,17 @@ class PipelineExecutor(ABC):
 
         return batch
 
+    def execute_group_with_profiling(
+        self,
+        stages: List["PipelineStage"],
+        batches: list[Req],
+        server_args: ServerArgs,
+    ):
+        """Execute a grouped request under the same profiler as a single request."""
+        with self.profile_execution(batches[0], dump_rank=0):
+            batches = self.execute_group(stages, batches, server_args)
+        return batches
+
     @abstractmethod
     def execute(
         self,
@@ -77,6 +88,22 @@ class PipelineExecutor(ABC):
             The processed batch.
         """
         raise NotImplementedError
+
+    def execute_group(
+        self,
+        stages: List["PipelineStage"],
+        batches: list[Req],
+        server_args: ServerArgs,
+    ):
+        """Execute all pipeline stages over a group of independent requests.
+
+        Executors own cross-rank scheduling, while stages own whether duplicate
+        work can be removed. The base executor simply calls
+        ``stage.run_grouped_requests`` for each stage in order.
+        """
+        for stage in stages:
+            batches = stage.run_grouped_requests(batches, server_args)
+        return batches
 
     @contextlib.contextmanager
     def profile_execution(self, batch: Req, dump_rank: int = 0):

@@ -51,7 +51,7 @@ from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.moe import (
     get_moe_a2a_backend,
     get_moe_runner_backend,
-    should_use_flashinfer_cutlass_moe_fp4_allgather,
+    should_skip_post_experts_all_reduce,
 )
 from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE, get_moe_impl_class
 from sglang.srt.layers.moe.topk import TopK, TopKOutputFormat
@@ -297,11 +297,10 @@ class MiMoV2MoE(nn.Module):
 
         final_hidden_states = self.experts(hidden_states, topk_output)
 
-        if (
-            self.tp_size > 1
-            and not should_allreduce_fusion
-            and not use_reduce_scatter
-            and not should_use_flashinfer_cutlass_moe_fp4_allgather()
+        if self.tp_size > 1 and not should_skip_post_experts_all_reduce(
+            is_tp_path=True,
+            use_reduce_scatter=use_reduce_scatter,
+            should_allreduce_fusion=should_allreduce_fusion,
         ):
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
@@ -573,8 +572,16 @@ class MiMoV2DecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         self.layer_id = layer_id
 
-        rope_theta = getattr(config, "rope_theta", 1000000)
+        rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
+        # In v5, rope_scaling is a property alias for rope_parameters and returns
+        # a standardized dict even when there's no actual scaling.  Treat the
+        # "default" (no-op) type as None so factory.py uses plain RotaryEmbedding.
+        if (
+            isinstance(rope_scaling, dict)
+            and rope_scaling.get("rope_type") == "default"
+        ):
+            rope_scaling = None
         max_position_embeddings = getattr(config, "max_position_embeddings", 32768)
 
         if self.is_swa_layer():
@@ -792,7 +799,7 @@ class MiMoV2Model(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
-        self.padding_idx = config.pad_token_id
+        self.padding_idx = getattr(config, "pad_token_id", None)
         self.vocab_size = config.vocab_size
         self.pp_group = get_pp_group()
 
