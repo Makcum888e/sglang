@@ -3,13 +3,16 @@ from typing import List, Union
 
 import torch
 
+from sglang.srt.managers.schedule_batch import MultimodalProcessorOutput
 from sglang.srt.models.glm_image import GlmImageForConditionalGeneration
 
 logger = logging.getLogger(__name__)
 from sglang.srt.multimodal.processors.base_processor import (
     BaseMultimodalProcessor as SGLangBaseProcessor,
 )
-from sglang.srt.multimodal.processors.base_processor import MultimodalSpecialTokens
+from sglang.srt.multimodal.processors.base_processor import (
+    MultimodalSpecialTokens,
+)
 
 
 class GlmImageProcessor(SGLangBaseProcessor):
@@ -302,12 +305,10 @@ class GlmImageProcessor(SGLangBaseProcessor):
             image_grid_thw=image_grid_thw,
         )
 
-        mm_inputs = {
-            "input_ids": input_ids.tolist(),
-            "mm_items": mm_items,
-            "im_token_id": self.mm_tokens.image_token_id,
-            "mrope_positions": mrope_positions,
-            "mrope_position_delta": mrope_position_delta,
-        }
-
-        return mm_inputs
+        return MultimodalProcessorOutput(
+            input_ids=input_ids.tolist(),
+            mm_items=mm_items,
+            im_token_id=self.mm_tokens.image_token_id,
+            mrope_positions=mrope_positions,
+            mrope_position_delta=mrope_position_delta,
+        )

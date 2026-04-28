@@ -16,7 +16,7 @@
 
 import copy
 import logging
-from typing import Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -24,17 +24,29 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from sglang.srt.distributed.parallel_state import get_pp_group
+from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.attention.vision import VisionAttention
 from sglang.srt.layers.dp_attention import (
     get_attention_tp_rank,
     get_attention_tp_size,
     is_dp_attention_enabled,
 )
-from sglang.srt.layers.linear import ColumnParallelLinear, RowParallelLinear
+from sglang.srt.layers.layernorm import RMSNorm
+from sglang.srt.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
+from sglang.srt.layers.radix_attention import RadixAttention
+from sglang.srt.layers.rotary_embedding import get_rope
 from sglang.srt.layers.utils import PPMissingLayer
-from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
+from sglang.srt.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from sglang.srt.managers.mm_utils import (
     MultiModalityDataPaddingPatternMultimodalTokens,
     general_mm_embed_routine,
@@ -42,7 +54,6 @@ from sglang.srt.managers.mm_utils import (
 from sglang.srt.managers.schedule_batch import MultimodalDataItem, MultimodalInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import default_weight_loader
-from sglang.srt.models.glm4 import Glm4Model
 from sglang.srt.models.utils import compute_cu_seqlens_from_grid_numpy
 from sglang.srt.multimodal.mm_utils import run_dp_sharded_mrope_vision_model
 from sglang.srt.server_args import get_global_server_args
@@ -403,6 +414,777 @@ class GlmImageVQVAE(nn.Module):
 
 
 # --------------------------------------------------------------------------- #
+# Text model
+# --------------------------------------------------------------------------- #
+
+
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
+    """Applies Rotary Position Embedding to the query and key tensors.
+
+    Args:
+        q (`torch.Tensor`): The query tensor.
+        k (`torch.Tensor`): The key tensor.
+        cos (`torch.Tensor`): The cosine part of the rotary embedding.
+        sin (`torch.Tensor`): The sine part of the rotary embedding.
+        unsqueeze_dim (`int`, *optional*, defaults to 1):
+            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
+            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
+            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
+            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
+            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
+            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
+    Returns:
+        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
+    """
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+
+    # Keep half or full tensor for later concatenation
+    rotary_dim = cos.shape[-1]
+    q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
+    k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
+
+    # Apply rotary embeddings on the first half or full tensor
+    q_embed = (q_rot * cos) + (rotate_half(q_rot) * sin)
+    k_embed = (k_rot * cos) + (rotate_half(k_rot) * sin)
+
+    # Concatenate back to full shape
+    q_embed = torch.cat([q_embed, q_pass], dim=-1)
+    k_embed = torch.cat([k_embed, k_pass], dim=-1)
+    return q_embed, k_embed
+
+
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_glm_image_rotary_pos_emb(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Apply GLM-Image rotary position embedding to query and key tensors.
+
+    Args:
+        q: Query tensor [num_tokens, num_heads, head_dim]
+        k: Key tensor [num_tokens, num_kv_heads, head_dim]
+        cos: Cosine values [num_tokens, rotary_dim]
+        sin: Sine values [num_tokens, rotary_dim]
+
+    Returns:
+        Tuple of (rotated_q, rotated_k) with same shapes as input
+    """
+    # cos/sin shape: [num_tokens, rotary_dim]
+    # Need to unsqueeze for broadcasting with heads dimension
+    cos = cos.unsqueeze(1)  # [num_tokens, 1, rotary_dim]
+    sin = sin.unsqueeze(1)  # [num_tokens, 1, rotary_dim]
+
+    rotary_dim = cos.shape[-1]
+
+    # Split into rotary and pass-through parts
+    q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
+    k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
+
+    # Apply rotary embeddings
+    q_embed = (q_rot * cos) + (rotate_half(q_rot) * sin)
+    k_embed = (k_rot * cos) + (rotate_half(k_rot) * sin)
+
+    # Concatenate back
+    q_embed = torch.cat([q_embed, q_pass], dim=-1)
+    k_embed = torch.cat([k_embed, k_pass], dim=-1)
+
+    return q_embed, k_embed
+
+
+class GlmImageRotaryEmbedding(nn.Module):
+    """
+    Custom Rotary Embedding for GLM-Image with M-RoPE support.
+
+    GLM-Image uses a 3D position encoding (temporal, height, width) with
+    M-RoPE sections [8, 12, 12]. This means:
+    - First 8 dims use temporal positions
+    - Next 12 dims use height positions
+    - Next 12 dims use width positions
+    - Pattern repeats for remaining dims
+
+    Unlike vLLM's standard MRotaryEmbedding which uses cache-based lookup,
+    this implementation computes cos/sin dynamically to handle arbitrary
+    position values without cache size limitations.
+
+    This follows the transformers reference implementation exactly:
+    - inv_freq is expanded for matmul with position_ids
+    - freqs = inv_freq @ position_ids (matrix multiplication)
+    - apply_mrope interleaves frequency chunks from different dimensions
+    """
+
+    def __init__(
+        self,
+        head_dim: int,
+        max_position_embeddings: int = 32768,
+        rope_theta: float = 10000.0,
+        partial_rotary_factor: float = 1.0,
+        mrope_section: list[int] | None = None,
+    ) -> None:
+        super().__init__()
+        self.head_dim = head_dim
+        self.max_position_embeddings = max_position_embeddings
+        self.rope_theta = rope_theta
+
+        # Compute rotary dimension
+        self.rotary_dim = int(head_dim * partial_rotary_factor)
+
+        # Default mrope_section for GLM-Image
+        self.mrope_section = mrope_section if mrope_section is not None else [8, 12, 12]
+
+        # Compute inverse frequencies
+        # inv_freq shape: [rotary_dim // 2]
+        inv_freq = 1.0 / (
+            rope_theta
+            ** (
+                torch.arange(0, self.rotary_dim, 2, dtype=torch.float32)
+                / self.rotary_dim
+            )
+        )
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def _apply_mrope(self, freqs: torch.Tensor) -> torch.Tensor:
+        """
+        Apply M-RoPE section interleaving.
+
+        For mrope_section = [8, 12, 12]:
+        - Split freqs into chunks of size [8, 12, 12, 8, 12, 12, ...]
+        - Take chunk[i % 3] from each split (alternating T, H, W dimensions)
+        - Concatenate back
+
+        Args:
+            freqs: Frequency tensor [3, num_tokens, rotary_dim // 2]
+
+        Returns:
+            Interleaved frequencies [num_tokens, rotary_dim // 2]
+        """
+        # freqs shape: [3, num_tokens, rotary_dim // 2]
+        # Split along last dimension according to mrope_section
+        chunks = freqs.split(self.mrope_section, dim=-1)
+
+        # Take chunk[i % 3] from each split
+        # chunks[i] has shape [3, num_tokens, section_size]
+        # We select dimension 0 (T), 1 (H), or 2 (W) based on i % 3
+        result = torch.cat([chunk[i % 3] for i, chunk in enumerate(chunks)], dim=-1)
+
+        return result
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Apply rotary position embeddings to query and key.
+
+        Args:
+            positions: Position IDs
+                - Shape [num_tokens] for 1D positions (text-only)
+                - Shape [3, num_tokens] for 3D M-RoPE positions (T, H, W)
+            query: Query tensor [num_tokens, num_heads * head_dim]
+            key: Key tensor [num_tokens, num_kv_heads * head_dim]
+
+        Returns:
+            Tuple of (rotated_query, rotated_key) with same shapes as input
+        """
+        # Get dimensions
+        if positions.ndim == 1:
+            num_tokens = positions.shape[0]
+        else:
+            num_tokens = positions.shape[1]
+
+        device = positions.device
+        dtype = query.dtype
+
+        # Ensure inv_freq is on same device
+        inv_freq = self.inv_freq.to(device=device, dtype=torch.float32)
+
+        if positions.ndim == 1:
+            # 1D positions: expand to 3D with same values
+            # Shape: [num_tokens] -> [3, num_tokens]
+            positions_3d = positions.unsqueeze(0).expand(3, -1)
+        else:
+            # Already 3D: [3, num_tokens]
+            positions_3d = positions
+
+        # Follow reference implementation exactly:
+        # Reference: inv_freq_expanded = self.inv_freq[None, None, :, None].expand(3, bs, -1, 1)
+        # Reference: position_ids_expanded = position_ids[:, :, None, :].float()  # (3, bs, 1, positions)
+        # Reference: freqs = (inv_freq_expanded @ position_ids_expanded).transpose(2, 3)
+        #
+        # For vLLM (no batch dim):
+        # inv_freq: [rotary_dim // 2]
+        # positions_3d: [3, num_tokens]
+        #
+        # We want: freqs[i, j, k] = positions_3d[i, j] * inv_freq[k]
+        # So: freqs = positions_3d[:, :, None] * inv_freq[None, None, :]
+        # Shape: [3, num_tokens, 1] * [1, 1, rotary_dim // 2] = [3, num_tokens, rotary_dim // 2]
+
+        # Compute frequencies using broadcasting (equivalent to matmul in reference)
+        positions_expanded = positions_3d.unsqueeze(-1).float()  # [3, num_tokens, 1]
+        inv_freq_expanded = inv_freq.unsqueeze(0).unsqueeze(
+            0
+        )  # [1, 1, rotary_dim // 2]
+        freqs = (
+            positions_expanded * inv_freq_expanded
+        )  # [3, num_tokens, rotary_dim // 2]
+
+        # Apply M-RoPE interleaving
+        # This selects different frequency dims from different position dims
+        freqs = self._apply_mrope(freqs)  # [num_tokens, rotary_dim // 2]
+
+        # Build cos/sin embeddings
+        # Concatenate freqs with itself for full rotary_dim (real and imaginary parts)
+        emb = torch.cat((freqs, freqs), dim=-1)  # [num_tokens, rotary_dim]
+        cos = emb.cos().to(dtype)  # [num_tokens, rotary_dim]
+        sin = emb.sin().to(dtype)  # [num_tokens, rotary_dim]
+
+        # Reshape query and key for rotary application
+        # query: [num_tokens, num_heads * head_dim] -> [num_tokens, num_heads, head_dim]
+        query_shape = query.shape
+        key_shape = key.shape
+
+        query = query.view(num_tokens, -1, self.head_dim)
+        key = key.view(num_tokens, -1, self.head_dim)
+
+        # Apply rotary embeddings
+        query, key = apply_glm_image_rotary_pos_emb(query, key, cos, sin)
+
+        # Reshape back
+        query = query.view(query_shape)
+        key = key.view(key_shape)
+
+        return query, key
+
+
+class GlmImageTextAttention(nn.Module):
+    """Multi-headed attention from 'Attention Is All You Need' paper"""
+
+    def __init__(
+        self,
+        config,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        layer_id: int,
+        rope_theta: float = 10000,
+        rope_scaling: Optional[Dict[str, Any]] = None,
+        max_position_embeddings: int = 131072,
+        quant_config: QuantizationConfig | None = None,
+        dual_chunk_attention_config: Optional[dict[str, Any]] = None,
+        partial_rotary_factor: float = 0.5,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.layer_id = layer_id
+        self.hidden_size = hidden_size
+        self.total_num_heads = num_heads
+        self.num_heads = self.total_num_heads
+        self.total_num_kv_heads = num_kv_heads
+        self.num_kv_heads = max(1, self.total_num_kv_heads)
+        self.head_dim = getattr(
+            config, "head_dim", self.hidden_size // self.total_num_heads
+        )
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.scaling = self.head_dim**-0.5
+        self.attention_dropout = config.attention_dropout
+
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size=hidden_size,
+            head_size=self.head_dim,
+            total_num_heads=self.total_num_heads,
+            total_num_kv_heads=self.total_num_kv_heads,
+            bias=config.attention_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+        )
+
+        self.o_proj = RowParallelLinear(
+            input_size=self.total_num_heads * self.head_dim,
+            output_size=hidden_size,
+            bias=None,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
+
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            rotary_dim=self.head_dim,
+            max_position=max_position_embeddings,
+            base=rope_theta,
+            rope_scaling=rope_scaling,
+            dual_chunk_attention_config=dual_chunk_attention_config,
+            partial_rotary_factor=partial_rotary_factor,
+            is_neox_style=True,
+        )
+
+        self.rope_parameters = config.rope_parameters
+
+        self.attn = RadixAttention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            layer_id=layer_id,
+            quant_config=quant_config,
+            prefix=add_prefix("attn", prefix),
+        )
+
+        rope_parameters = getattr(config, "rope_parameters", None)
+        rope_theta = 10000.0
+        partial_rotary_factor = 1.0
+        mrope_section = [8, 12, 12]  # Default for GLM-Image
+
+        if rope_parameters is not None:
+            rope_theta = rope_parameters.get("rope_theta", rope_theta)
+            partial_rotary_factor = rope_parameters.get(
+                "partial_rotary_factor", partial_rotary_factor
+            )
+            mrope_section = rope_parameters.get("mrope_section", mrope_section)
+
+        self.rot2 = GlmImageRotaryEmbedding(
+            head_dim=self.head_dim,
+            max_position_embeddings=max_position_embeddings,
+            rope_theta=rope_theta,
+            partial_rotary_factor=partial_rotary_factor,
+            mrope_section=mrope_section,
+        )
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        **kwargs,
+    ) -> torch.Tensor:
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+
+        # q2, k2 = self.rotary_emb(positions, q, k)
+        q, k = self.rot2(positions, q, k)
+        # print(q2-q,k2-k)
+
+        attn_output = self.attn(q, k, v, forward_batch)
+
+        attn_output = self.o_proj(attn_output)
+
+        return attn_output
+
+
+class GlmImageRMSNorm(nn.Module):
+    def __init__(self, hidden_size, eps: float = 1e-6) -> None:
+        """
+        GlmImageRMSNorm is equivalent to T5LayerNorm
+        """
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)
+
+    def extra_repr(self):
+        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+
+
+class GlmImageTextRotaryEmbedding(nn.Module):
+    inv_freq: torch.Tensor  # fix linting for `register_buffer`
+
+    def __init__(self, config, device=None):
+        super().__init__()
+        self.max_seq_len_cached = config.max_position_embeddings
+        self.original_max_seq_len = config.max_position_embeddings
+
+        self.config = config
+
+        self.rope_type = self.config.rope_parameters["rope_type"]
+        inv_freq, self.attention_scaling = self.compute_default_rope_parameters(
+            self.config, device
+        )
+
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.register_buffer("original_inv_freq", inv_freq.clone(), persistent=False)
+        self.mrope_section = config.rope_parameters.get("mrope_section", [8, 12, 12])
+
+    @staticmethod
+    def compute_default_rope_parameters(
+        config=None,
+        device: Optional["torch.device"] = None,
+        seq_len: int | None = None,
+    ) -> tuple["torch.Tensor", float]:
+        """
+        Computes the inverse frequencies according to the original RoPE implementation
+        Args:
+            config ([`~transformers.PreTrainedConfig`]):
+                The model configuration.
+            device (`torch.device`):
+                The device to use for initialization of the inverse frequencies.
+            seq_len (`int`, *optional*):
+                The current sequence length. Unused for this type of RoPE.
+        Returns:
+            Tuple of (`torch.Tensor`, `float`), containing the inverse frequencies for the RoPE embeddings and the
+            post-processing scaling factor applied to the computed cos/sin (unused in this type of RoPE).
+        """
+        base = config.rope_parameters["rope_theta"]
+        partial_rotary_factor = config.rope_parameters.get("partial_rotary_factor", 1.0)
+        head_dim = (
+            getattr(config, "head_dim", None)
+            or config.hidden_size // config.num_attention_heads
+        )
+        dim = int(head_dim * partial_rotary_factor)
+
+        attention_factor = 1.0  # Unused in this type of RoPE
+
+        # Compute the inverse frequencies
+        inv_freq = 1.0 / (
+            base
+            ** (
+                torch.arange(0, dim, 2, dtype=torch.int64).to(
+                    device=device, dtype=torch.float
+                )
+                / dim
+            )
+        )
+        return inv_freq, attention_factor
+
+    def forward(self, x, position_ids):
+        # In contrast to other models, GLM-V has different position ids for the grids
+        # So we expand the inv_freq to shape (3, ...)
+        inv_freq_expanded = (
+            self.inv_freq[None, None, :, None]
+            .float()
+            .expand(3, position_ids.shape[1], -1, 1)
+        )
+        position_ids_expanded = position_ids[
+            :, :, None, :
+        ].float()  # shape (3, bs, 1, positions)
+
+        device_type = (
+            x.device.type
+            if isinstance(x.device.type, str) and x.device.type != "mps"
+            else "cpu"
+        )
+
+        freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(
+            2, 3
+        )
+        freqs = self.apply_mrope(freqs, self.mrope_section)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos = emb.cos() * self.attention_scaling
+        sin = emb.sin() * self.attention_scaling
+
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+
+    def apply_mrope(self, freqs, mrope_section):
+        section = mrope_section
+        chunks = freqs.split(section, dim=-1)
+        result = torch.cat([chunk[i % 3] for i, chunk in enumerate(chunks)], dim=-1)
+        return result
+
+    def load_weights(self, weights: Any) -> set[str]:
+        # Copied from LlamaModel.load_weights but adapted
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+
+        def _load_with_shard_id(
+            weight_loader, param, loaded_weight: torch.Tensor, shard_id
+        ) -> None:
+
+            try:
+                weight_loader(param, loaded_weight, shard_id)
+                return
+            except (AssertionError, TypeError):
+                pass
+
+            # Fall back between common representations.
+            if isinstance(shard_id, str):
+                mapping = {"q": 0, "k": 1, "v": 2}
+                if shard_id in mapping:
+                    weight_loader(param, loaded_weight, mapping[shard_id])
+                    return
+                if shard_id.isdigit():
+                    weight_loader(param, loaded_weight, int(shard_id))
+                    return
+            elif isinstance(shard_id, int):
+                mapping = {0: "q", 1: "k", 2: "v"}
+                if shard_id in mapping:
+                    weight_loader(param, loaded_weight, mapping[shard_id])
+                    return
+
+            # Re-raise with a clearer message.
+            raise TypeError(
+                f"Unsupported shard_id={shard_id!r} for weight_loader={weight_loader} "
+                f"(param={getattr(param, 'name', '<param>')})."
+            )
+
+        stacked_params_mapping = getattr(
+            getattr(self.config, "arch_config", object()),
+            "stacked_params_mapping",
+            None,
+        )
+        if stacked_params_mapping is None:
+            stacked_params_mapping = [
+                # Fused QKV shards; downstream loaders may want "q/k/v" or 0/1/2.
+                (".qkv_proj", ".q_proj", "q"),
+                (".qkv_proj", ".k_proj", "k"),
+                (".qkv_proj", ".v_proj", "v"),
+                (".gate_up_proj", ".gate_proj", 0),
+                (".gate_up_proj", ".up_proj", 1),
+            ]
+
+        for name, loaded_weight in weights:
+            if "rotary_emb.inv_freq" in name:
+                continue
+
+            # The config has stacked_params_mapping
+            for (
+                param_name,
+                weight_name,
+                shard_id,
+            ) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+
+                if name not in params_dict:
+                    continue
+
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                _load_with_shard_id(weight_loader, param, loaded_weight, shard_id)
+                break
+            else:
+                if name not in params_dict:
+                    continue
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+
+            loaded_params.add(name)
+        return loaded_params
+
+
+class GlmImageTextMLP(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.gate_up_proj = MergedColumnParallelLinear(
+            input_size=hidden_size,
+            output_sizes=[intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
+        )
+        self.down_proj = RowParallelLinear(
+            input_size=intermediate_size,
+            output_size=hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
+        )
+        if hidden_act != "silu":
+            raise ValueError(
+                "Glm-Image uses `silu` as the hidden activation "
+                "function. Please set `hidden_activation` to "
+                "`silu`."
+            )
+        self.activation_fn = SiluAndMul()
+
+    def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
+        gate_up, _ = self.gate_up_proj(x)
+
+        x = self.activation_fn(gate_up)
+
+        x, _ = self.down_proj(x)
+        return x
+
+
+class GlmImageTextDecoderLayer(nn.Module):
+    def __init__(
+        self,
+        layer_id: int,
+        config,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.self_attn = GlmImageTextAttention(
+            layer_id=layer_id,
+            config=config,
+            hidden_size=self.hidden_size,
+            num_heads=config.num_attention_heads,
+            num_kv_heads=getattr(
+                config,
+                "num_key_value_heads",
+                config.num_attention_heads,
+            ),
+            quant_config=quant_config,
+            prefix=f"{prefix}.self_attn",
+        )
+        self.mlp = GlmImageTextMLP(
+            hidden_size=self.hidden_size,
+            intermediate_size=config.intermediate_size,
+            hidden_act=config.hidden_act,
+            quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
+        )
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.post_self_attn_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.post_mlp_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+        **kwargs,
+    ) -> tuple[torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None]:
+
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+        # Self Attention
+        hidden_states, _ = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+            forward_batch=forward_batch,
+            **kwargs,
+        )
+
+        hidden_states = self.post_self_attn_layernorm(hidden_states)
+        hidden_states = residual + hidden_states
+
+        # Fully Connected
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.post_mlp_layernorm(hidden_states)
+        hidden_states = residual + hidden_states
+
+        return hidden_states, None
+
+
+class GlmImageTextModel(nn.Module):
+    def __init__(
+        self,
+        config,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        decoder_layer_type: type[nn.Module] = GlmImageTextDecoderLayer,
+        alt_stream: Optional[torch.cuda.Stream] = None,
+    ):
+        super().__init__()
+        self.config = config
+        self.quant_config = None
+
+        self.vocab_size = config.vocab_size
+        self.pp_group = get_pp_group()
+
+        if self.pp_group.is_first_rank:
+            self.embed_tokens = VocabParallelEmbedding(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                use_attn_tp_group=is_dp_attention_enabled(),
+                prefix=add_prefix("embed_tokens", prefix),
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
+
+        self.layers = nn.ModuleList(
+            [
+                GlmImageTextDecoderLayer(
+                    layer_id=i,
+                    config=config,
+                    quant_config=self.quant_config,
+                    prefix=add_prefix(f"layers.{i}", getattr(config, "prefix", "")),
+                )
+                for i in range(config.num_hidden_layers)
+            ]
+        )
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.rotary_emb = GlmImageTextRotaryEmbedding(config=config)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        forward_batch: ForwardBatch,
+        position_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        input_embeds: torch.Tensor | None = None,
+        output_hidden_states: bool | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
+        )
+        if input_embeds is None:
+            input_embeds = self.embed_tokens(input_ids)
+
+        hidden_states = input_embeds
+        # position_embeddings = self.rotary_emb(hidden_states, position_ids=position_ids)
+
+        residual = None
+        for layer in self.layers:
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                forward_batch,
+                residual,
+                # attention_mask=attention_mask,
+                # position_ids=text_position_ids,
+                # position_embeddings=position_embeddings,
+            )
+
+        hidden_states = self.norm(hidden_states)
+
+        return hidden_states
+
+    def get_input_embeddings(self):
+        return self.embed_tokens
+
+
+# --------------------------------------------------------------------------- #
 # Main model
 # --------------------------------------------------------------------------- #
 
@@ -440,7 +1222,7 @@ class GlmImageForConditionalGeneration(nn.Module):
         self.vqvae = GlmImageVQVAE(self.vq_config)
 
         # Language model (reuse Glm4Model)
-        self.model = Glm4Model(
+        self.model = GlmImageTextModel(
             self.text_config,
             quant_config=quant_config,
             prefix=add_prefix("model", prefix),
@@ -524,9 +1306,6 @@ class GlmImageForConditionalGeneration(nn.Module):
             all_embeds.append(embeds)
 
         return torch.cat(all_embeds, dim=0)
-
-    def get_input_embeddings(self):
-        return self.model.embed_tokens
 
     def _get_decode_mrope_positions(self, forward_batch: ForwardBatch) -> torch.Tensor:
         """Look up pre-computed 2D spatial MRoPE positions during decode.
