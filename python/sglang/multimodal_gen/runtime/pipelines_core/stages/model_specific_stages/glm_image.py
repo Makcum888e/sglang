@@ -4,6 +4,7 @@ import time
 from typing import List, Optional, Union
 
 import numpy as np
+import requests
 import torch
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.utils.torch_utils import randn_tensor
@@ -226,12 +227,23 @@ class GlmImageBeforeDenoisingStage(PipelineStage):
         )
 
         # SGLang Engine call
-        output = self.ar_engine.generate(
-            input_ids=inputs["input_ids"][0].tolist(),
-            image_data=[{"image_grid_thw": image_grid_thw}],
-            sampling_params={"temperature": 1.0, "max_new_tokens": max_new_tokens},
-        )
-        generated_ids = output["output_ids"]
+        # output = self.ar_engine.generate(
+        #    input_ids=inputs["input_ids"][0].tolist(),
+        #    image_data=[{"image_grid_thw": image_grid_thw}],
+        #    sampling_params={"temperature": 1.0, "max_new_tokens": max_new_tokens},
+        # )
+        # generated_ids = output["output_ids"]
+        payload = {
+            "input_ids": inputs["input_ids"][0].tolist(),
+            "image_data": [{"image_grid_thw": image_grid_thw.tolist()}],
+            "sampling_params": {"temperature": 1.0, "max_new_tokens": max_new_tokens},
+        }
+        print(payload)
+        response = requests.post("http://127.0.0.1:8764" + "/generate", json=payload)
+        print(response)
+        data = response.json()
+        print(data)
+        generated_ids = data.get("output_ids")
 
         # Extract large image tokens + upsample D32→D16
         prior_token_ids_d32 = torch.tensor(

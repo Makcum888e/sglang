@@ -1,3 +1,4 @@
+import atexit
 import logging
 import multiprocessing
 import os
@@ -16,6 +17,7 @@ class VisionLanguageEncoderLoader(ComponentLoader):
 
     component_names = ["vision_language_encoder"]
     expected_library = "transformers"
+    engine = None
 
     def load_customized(
         self,
@@ -24,7 +26,6 @@ class VisionLanguageEncoderLoader(ComponentLoader):
         transformers_or_diffusers: str = "vision_language_encoder",
     ) -> Any:
         if transformers_or_diffusers == "vision_language_encoder":
-            from sglang import Engine
 
             model_root = os.path.dirname(component_model_path)
             processor_path = os.path.join(model_root, "processor")
@@ -42,18 +43,66 @@ class VisionLanguageEncoderLoader(ComponentLoader):
                 )
                 current._config["daemon"] = False
             try:
-                engine = Engine(
-                    model_path=component_model_path,
-                    tokenizer_path=processor_path,
-                    mem_fraction_static=0.5,
-                    enable_multimodal=True,
-                    disable_cuda_graph=True,
-                    tp_size=server_args.tp_size if server_args.tp_size > 0 else 1,
+                # engine = Engine(
+                #    model_path=component_model_path,
+                #    tokenizer_path=processor_path,
+                #    mem_fraction_static=0.6,
+                #    enable_multimodal=True,
+                #    disable_cuda_graph=True,
+                #    tp_size=server_args.tp_size if server_args.tp_size > 0 else 1,
+                #    port=8764,
+                # )
+                # command = [
+                #    "sglang",
+                #    "serve",
+                #    "--model-path",
+                #    component_model_path,
+                #    "--tokenizer-path",
+                #    processor_path,
+                #    "--mem-fraction-static",
+                #    0.8,
+                #    "--enable-multimodal",
+                #    "--disable-cuda-graph",
+                #    "--port",
+                #    8764,
+                # ]
+                from sglang.test.test_utils import popen_launch_server
+
+                self.engine = popen_launch_server(
+                    component_model_path,
+                    "http://127.0.0.1:8764",
+                    timeout=600,
+                    other_args=(
+                        "--tokenizer-path",
+                        processor_path,
+                        "--mem-fraction-static",
+                        0.6,
+                        "--enable-multimodal",
+                        "--disable-cuda-graph",
+                        "--device",
+                        "npu",
+                        "--attention-backend",
+                        "ascend",
+                        "--base-gpu-id",
+                        1,
+                        "--disable-fast-image-processor",
+                    ),
                 )
+                atexit.register(self.cleanup)
+            except Exception as e:
+                print(e)
             finally:
                 current._config["daemon"] = was_daemon
-            return engine
+            return self.engine
         else:
             raise ValueError(
                 f"Unsupported library for VisionLanguageEncoder: {transformers_or_diffusers}"
             )
+
+    def cleanup(self):
+        if self.engine.poll() is None:
+            self.engine.terminate()
+            try:
+                self.engine.wait(timeout=10)
+            except self.engine.TimeoutExpired:
+                self.engine.kill()

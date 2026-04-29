@@ -239,6 +239,8 @@ class GlmImageProcessor(SGLangBaseProcessor):
                         grid = img["image_grid_thw"]
                         if isinstance(grid, torch.Tensor):
                             image_grid_thw = grid
+                        if isinstance(grid, list):
+                            image_grid_thw = torch.tensor(grid)
 
             # Add offsets to all mm_items (matching base_processor behavior).
             # Offsets tell the chunked prefill where image tokens are in input_ids.

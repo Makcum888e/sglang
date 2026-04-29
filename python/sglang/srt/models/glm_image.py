@@ -23,12 +23,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-from sglang.srt.distributed.parallel_state import get_pp_group
+from sglang.srt.distributed import (
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+)
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.attention.vision import VisionAttention
 from sglang.srt.layers.dp_attention import (
-    get_attention_tp_rank,
-    get_attention_tp_size,
     is_dp_attention_enabled,
 )
 from sglang.srt.layers.layernorm import RMSNorm
@@ -78,16 +79,16 @@ class GlmImageVisionMLP(nn.Module):
         use_data_parallel: bool = False,
     ):
         super().__init__()
-        self.tp_size = 1 if use_data_parallel else get_attention_tp_size()
-        self.tp_rank = 0 if use_data_parallel else get_attention_tp_rank()
+        # self.tp_size = 1 if use_data_parallel else get_attention_tp_size()
+        # self.tp_rank = 0 if use_data_parallel else get_attention_tp_rank()
         self.fc1 = ColumnParallelLinear(
             in_features,
             hidden_features,
             bias=bias,
             quant_config=quant_config,
             prefix=add_prefix("fc1", prefix),
-            tp_size=self.tp_size,
-            tp_rank=self.tp_rank,
+            # tp_size=self.tp_size,
+            # tp_rank=self.tp_rank,
         )
         self.fc2 = RowParallelLinear(
             hidden_features,
@@ -95,8 +96,8 @@ class GlmImageVisionMLP(nn.Module):
             bias=bias,
             quant_config=quant_config,
             prefix=add_prefix("fc2", prefix),
-            tp_size=self.tp_size,
-            tp_rank=self.tp_rank,
+            # tp_size=self.tp_size,
+            # tp_rank=self.tp_rank,
             use_dp_attention_reduce=is_dp_attention_enabled(),
         )
         self.act = nn.GELU()
@@ -691,12 +692,22 @@ class GlmImageTextAttention(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
+        tp_size = get_tensor_model_parallel_world_size()
         self.layer_id = layer_id
         self.hidden_size = hidden_size
         self.total_num_heads = num_heads
-        self.num_heads = self.total_num_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
-        self.num_kv_heads = max(1, self.total_num_kv_heads)
+        if self.total_num_kv_heads >= tp_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         self.head_dim = getattr(
             config, "head_dim", self.hidden_size // self.total_num_heads
         )
