@@ -1364,11 +1364,12 @@ class GlmImageForConditionalGeneration(nn.Module):
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ):
         if self.is_mrope_enabled:
-            if forward_batch.forward_mode.is_decode():
-                # Use pre-computed 2D spatial positions for image generation
-                positions = self._get_decode_mrope_positions(forward_batch)
-            else:
-                positions = forward_batch.mrope_positions
+            positions = forward_batch.mrope_positions
+            # if forward_batch.forward_mode.is_decode():
+            #    # Use pre-computed 2D spatial positions for image generation
+            #    positions = self._get_decode_mrope_positions(forward_batch)
+            # else:
+            #    positions = forward_batch.mrope_positions
 
         if not (
             forward_batch.forward_mode.is_decode()
