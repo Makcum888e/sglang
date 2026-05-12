@@ -12,7 +12,10 @@ from diffusers.utils.torch_utils import randn_tensor
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.models.dits.glm_image import GlmImageKVCache
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
-from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
+from sglang.multimodal_gen.runtime.pipelines_core.stages.base import (
+    PipelineStage,
+    StageParallelismType,
+)
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
@@ -84,64 +87,20 @@ def retrieve_timesteps(
     return timesteps, num_inference_steps
 
 
-class GlmImageBeforeDenoisingStage(PipelineStage):
-    r"""
-    Pipeline for text-to-image generation using GLM-Image.
-
-    This pipeline integrates both the AR (autoregressive) model for token generation and the DiT (diffusion
-    transformer) model for image decoding.
-
-    Args:
-        vae ([`AutoencoderKL`]):
-            Variational Auto-Encoder (VAE) Model to encode and decode images to and from latent representations.
-        text_encoder ([`T5EncoderModel`]):
-            Frozen text-encoder for glyph embeddings.
-        tokenizer (`PreTrainedTokenizer`):
-            Tokenizer for the text encoder.
-        processor (`AutoProcessor`):
-            Processor for the AR model to handle chat templates and tokenization.
-        vision_language_encoder:
-            SGLang Engine instance for the AR model that generates image tokens from text prompts.
-        transformer ([`GlmImageTransformer2DModel`]):
-            A text conditioned transformer to denoise the encoded image latents (DiT).
-        scheduler ([`SchedulerMixin`]):
-            A scheduler to be used in combination with `transformer` to denoise the encoded image latents.
-    """
+class GlmImageAR(PipelineStage):
 
     def __init__(
         self,
-        tokenizer,
         processor,
-        text_encoder,
-        vision_language_encoder,
-        vae,
-        transformer,
-        scheduler,
     ):
         super().__init__()
-
-        self.tokenizer = tokenizer
         self.processor = processor
-        self.text_encoder = text_encoder
-        self.ar_engine = vision_language_encoder
-        self.vae = vae
-        self.transformer = transformer
-        self.scheduler = scheduler
 
-        self.vae_scale_factor = (
-            2 ** (len(self.vae.config.block_out_channels) - 1)
-            if getattr(self, "vae", None)
-            else 8
-        )
-        self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
-
-        self.default_sample_size = (
-            self.transformer.config.sample_size
-            if hasattr(self, "transformer")
-            and self.transformer is not None
-            and hasattr(self.transformer.config, "sample_size")
-            else 128
-        )
+    @property
+    def parallelism_type(self) -> StageParallelismType:
+        # if get_global_server_args().enable_cfg_parallel:
+        #     return StageParallelismType.MAIN_RANK_ONLY
+        return StageParallelismType.MAIN_RANK_ONLY
 
     @staticmethod
     def _compute_generation_params(
@@ -166,17 +125,6 @@ class GlmImageBeforeDenoisingStage(PipelineStage):
             large_image_start_offset = sum(grid_sizes[1:])
             target_grid_h, target_grid_w = grid_hw[0]
         return max_new_tokens, large_image_start_offset, target_grid_h, target_grid_w
-
-    @staticmethod
-    def _upsample_token_ids(
-        token_ids: torch.Tensor, token_h: int, token_w: int
-    ) -> torch.Tensor:
-        token_ids = token_ids.view(1, 1, token_h, token_w)
-        token_ids = torch.nn.functional.interpolate(
-            token_ids.float(), scale_factor=2, mode="nearest"
-        ).to(dtype=torch.long)
-        token_ids = token_ids.view(1, -1)
-        return token_ids
 
     def generate_prior_tokens(
         self,
@@ -238,11 +186,8 @@ class GlmImageBeforeDenoisingStage(PipelineStage):
             "image_data": [{"image_grid_thw": image_grid_thw.tolist()}],
             "sampling_params": {"temperature": 1.0, "max_new_tokens": max_new_tokens},
         }
-        print(payload)
         response = requests.post("http://127.0.0.1:8764" + "/generate", json=payload)
-        print(response)
         data = response.json()
-        print(data)
         generated_ids = data.get("output_ids")
 
         # Extract large image tokens + upsample D32→D16
@@ -255,6 +200,104 @@ class GlmImageBeforeDenoisingStage(PipelineStage):
         )
 
         return prior_token_ids, None
+
+    @staticmethod
+    def _upsample_token_ids(
+        token_ids: torch.Tensor, token_h: int, token_w: int
+    ) -> torch.Tensor:
+        token_ids = token_ids.view(1, 1, token_h, token_w)
+        token_ids = torch.nn.functional.interpolate(
+            token_ids.float(), scale_factor=2, mode="nearest"
+        ).to(dtype=torch.long)
+        token_ids = token_ids.view(1, -1)
+        return token_ids
+
+    @torch.no_grad()
+    def forward(
+        self,
+        batch: Req,
+        server_args: ServerArgs,
+    ) -> Req:
+
+        prompt = batch.prompt
+        height = batch.height
+        width = batch.width
+
+        device = get_local_torch_device()
+
+        time_start = time.time()
+        prior_token_id, _ = self.generate_prior_tokens(
+            prompt=prompt,
+            height=height,
+            width=width,
+        )
+        prior_token_id = prior_token_id.to(device=device)
+        time_end = time.time()
+        logger.info(f"generate_prior_tokens time: {time_end - time_start}")
+
+        batch.prior_token_id = prior_token_id
+
+        return batch
+
+
+class GlmImageBeforeDenoisingStage(PipelineStage):
+    r"""
+    Pipeline for text-to-image generation using GLM-Image.
+
+    This pipeline integrates both the AR (autoregressive) model for token generation and the DiT (diffusion
+    transformer) model for image decoding.
+
+    Args:
+        vae ([`AutoencoderKL`]):
+            Variational Auto-Encoder (VAE) Model to encode and decode images to and from latent representations.
+        text_encoder ([`T5EncoderModel`]):
+            Frozen text-encoder for glyph embeddings.
+        tokenizer (`PreTrainedTokenizer`):
+            Tokenizer for the text encoder.
+        processor (`AutoProcessor`):
+            Processor for the AR model to handle chat templates and tokenization.
+        vision_language_encoder:
+            SGLang Engine instance for the AR model that generates image tokens from text prompts.
+        transformer ([`GlmImageTransformer2DModel`]):
+            A text conditioned transformer to denoise the encoded image latents (DiT).
+        scheduler ([`SchedulerMixin`]):
+            A scheduler to be used in combination with `transformer` to denoise the encoded image latents.
+    """
+
+    def __init__(
+        self,
+        tokenizer,
+        processor,
+        text_encoder,
+        vision_language_encoder,
+        vae,
+        transformer,
+        scheduler,
+    ):
+        super().__init__()
+
+        self.tokenizer = tokenizer
+        self.processor = processor
+        self.text_encoder = text_encoder
+        self.ar_engine = vision_language_encoder
+        self.vae = vae
+        self.transformer = transformer
+        self.scheduler = scheduler
+
+        self.vae_scale_factor = (
+            2 ** (len(self.vae.config.block_out_channels) - 1)
+            if getattr(self, "vae", None)
+            else 8
+        )
+        self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
+
+        self.default_sample_size = (
+            self.transformer.config.sample_size
+            if hasattr(self, "transformer")
+            and self.transformer is not None
+            and hasattr(self.transformer.config, "sample_size")
+            else 128
+        )
 
     def get_glyph_texts(self, prompt):
         prompt = prompt[0] if isinstance(prompt, list) else prompt
@@ -502,18 +545,8 @@ class GlmImageBeforeDenoisingStage(PipelineStage):
 
         batch_size = 1
 
-        device = get_local_torch_device()
-
-        time_start = time.time()
-        prior_token_id, _ = self.generate_prior_tokens(
-            prompt=prompt,
-            height=height,
-            width=width,
-        )
-        prior_token_id = prior_token_id.to(device=device)
-        time_end = time.time()
-        logger.info(f"generate_prior_tokens time: {time_end - time_start}")
-
+        prior_token_id = batch.prior_token_id
+        prior_token_id = prior_token_id.to(device)
         # 3. Encode input prompt
         prompt_embeds, negative_prompt_embeds = self.encode_prompt(
             prompt,

@@ -8,6 +8,7 @@ from sglang.multimodal_gen.runtime.distributed import get_sp_group
 from sglang.multimodal_gen.runtime.distributed.parallel_state import (
     get_cfg_group,
     get_classifier_free_guidance_rank,
+    get_world_group,
     get_world_rank,
 )
 from sglang.multimodal_gen.runtime.pipelines_core import Req
@@ -65,6 +66,7 @@ class ParallelExecutor(PipelineExecutor):
         else:
             rank = get_world_rank()
         cfg_group = get_cfg_group()
+        group = get_world_group()
 
         # TODO: decide when to gather on main when CFG_PARALLEL -> MAIN_RANK_ONLY
         for stage in stages:
@@ -74,6 +76,13 @@ class ParallelExecutor(PipelineExecutor):
                 if rank == 0:
                     # Only main rank executes, others just wait
                     payload = run_stage(stage, payload)
+                torch.distributed.barrier()
+                obj_list = [payload] if rank == 0 else []
+                broadcasted_list = broadcast_pyobj(
+                    obj_list, rank=rank, dist_group=group.cpu_group, src=0
+                )
+                if rank != 0:
+                    payload = broadcasted_list[0]
                 torch.distributed.barrier()
 
             elif paradigm == StageParallelismType.CFG_PARALLEL:

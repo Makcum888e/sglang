@@ -27,6 +27,16 @@ class VisionLanguageEncoderLoader(ComponentLoader):
     ) -> Any:
         if transformers_or_diffusers == "vision_language_encoder":
 
+            # from sglang.srt.models.glm_image import GlmImageForConditionalGeneration
+            #
+            # model = GlmImageForConditionalGeneration(
+            #    config,
+            # )
+            #
+            # return model
+
+            return 8764
+
             model_root = os.path.dirname(component_model_path)
             processor_path = os.path.join(model_root, "processor")
 
@@ -85,11 +95,11 @@ class VisionLanguageEncoderLoader(ComponentLoader):
                         "npu",
                         "--attention-backend",
                         "ascend",
-                        # "--base-gpu-id",
-                        # 2,
+                        "--base-gpu-id",
+                        2,
                         "--disable-fast-image-processor",
                         "--tp-size",
-                        4,
+                        2,
                     ),
                 )
                 atexit.register(self.cleanup)
