@@ -131,6 +131,7 @@ class GlmImageAR(PipelineStage):
         prompt: str,
         height: int,
         width: int,
+        server_args: ServerArgs,
         image=None,
         factor: int = 32,
     ):
@@ -181,14 +182,20 @@ class GlmImageAR(PipelineStage):
         #    sampling_params={"temperature": 1.0, "max_new_tokens": max_new_tokens},
         # )
         # generated_ids = output["output_ids"]
-        payload = {
-            "input_ids": inputs["input_ids"][0].tolist(),
-            "image_data": [{"image_grid_thw": image_grid_thw.tolist()}],
-            "sampling_params": {"temperature": 1.0, "max_new_tokens": max_new_tokens},
-        }
-        response = requests.post("http://127.0.0.1:8764" + "/generate", json=payload)
-        data = response.json()
-        generated_ids = data.get("output_ids")
+        if server_args.srt_encoder_url is not None:
+            payload = {
+                "input_ids": inputs["input_ids"][0].tolist(),
+                "image_data": [{"image_grid_thw": image_grid_thw.tolist()}],
+                "sampling_params": {
+                    "temperature": 1.0,
+                    "max_new_tokens": max_new_tokens,
+                },
+            }
+            response = requests.post(
+                server_args.srt_encoder_url + "/generate", json=payload
+            )
+            data = response.json()
+            generated_ids = data.get("output_ids")
 
         # Extract large image tokens + upsample D32→D16
         prior_token_ids_d32 = torch.tensor(
@@ -230,6 +237,7 @@ class GlmImageAR(PipelineStage):
             prompt=prompt,
             height=height,
             width=width,
+            server_args=server_args,
         )
         prior_token_id = prior_token_id.to(device=device)
         time_end = time.time()
