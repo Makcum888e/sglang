@@ -17,6 +17,7 @@ from sglang.multimodal_gen.runtime.layers.attention import (
     USPAttention,
     build_varlen_mask_meta,
 )
+from sglang.multimodal_gen.runtime.layers.layernorm import RMSNorm
 from sglang.multimodal_gen.runtime.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -40,16 +41,6 @@ from sglang.multimodal_gen.runtime.models.dits.base import BaseDiT
 
 OUTPUT_IMAGE_INDICATOR = 2
 LLM_TOKEN_INDICATOR = 3
-
-
-class Ideogram4RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6) -> None:
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim))
-        self.eps = eps
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.rms_norm(x, self.weight.shape, self.weight, self.eps)
 
 
 class Ideogram4QuantizedLinear(ReplicatedLinear):
@@ -212,8 +203,8 @@ class Ideogram4Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.qkv",
         )
-        self.norm_q = Ideogram4RMSNorm(self.head_dim, eps=eps)
-        self.norm_k = Ideogram4RMSNorm(self.head_dim, eps=eps)
+        self.norm_q = RMSNorm(self.head_dim, eps=eps)
+        self.norm_k = RMSNorm(self.head_dim, eps=eps)
         self.attn = USPAttention(
             num_heads=self.local_num_heads,
             head_size=self.head_dim,
@@ -308,10 +299,10 @@ class Ideogram4TransformerBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.feed_forward",
         )
-        self.attention_norm1 = Ideogram4RMSNorm(hidden_size, eps=norm_eps)
-        self.ffn_norm1 = Ideogram4RMSNorm(hidden_size, eps=norm_eps)
-        self.attention_norm2 = Ideogram4RMSNorm(hidden_size, eps=norm_eps)
-        self.ffn_norm2 = Ideogram4RMSNorm(hidden_size, eps=norm_eps)
+        self.attention_norm1 = RMSNorm(hidden_size, eps=norm_eps)
+        self.ffn_norm1 = RMSNorm(hidden_size, eps=norm_eps)
+        self.attention_norm2 = RMSNorm(hidden_size, eps=norm_eps)
+        self.ffn_norm2 = RMSNorm(hidden_size, eps=norm_eps)
         self.adaln_modulation = _linear(
             adaln_dim,
             4 * hidden_size,
@@ -448,7 +439,7 @@ class Ideogram4Transformer2DModel(BaseDiT):
             quant_config=quant_config,
             prefix="input_proj",
         )
-        self.llm_cond_norm = Ideogram4RMSNorm(cfg.llm_features_dim, eps=1e-6)
+        self.llm_cond_norm = RMSNorm(cfg.llm_features_dim, eps=1e-6)
         self.llm_cond_proj = _linear(
             cfg.llm_features_dim,
             hidden_size,
