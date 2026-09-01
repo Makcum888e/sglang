@@ -5,3 +5,8 @@
 | conc | valid reps (lat/RTF/WER) | evaluated/requests | wall(s) mean | req/s mean | req/s best | RTFx mean | lat mean(s) | lat p50(s) | lat p95(s) | RTF mean | RTF p95 | corpus WER | max WER |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | 16 | 3/3 / 3/3 / 3/3 | 3264/3264 | 45.781 | 23.770 | 24.219 | 112.576 | 0.669 | 0.654 | 0.854 | 0.1449 | 0.1933 | 0.0123 | 0.1818 |
+
+
+sgl-omni serve --model-path /home/weights/Qwen/Qwen3-ASR-1.7B/ asr.engine.disable_cuda_graph on asr.engine.cuda_graph_backend_prefill None
+
+python -m benchmarks.eval.benchmark_asr_seedtts --port 8000 --concurrencies 16 --warmup --dataset-revision 27f4c1adee83b5b29b7c4b375f6b976324bda308 --model-revision 7278e1e70fe206f11671096ffdd38061171dd6e5
